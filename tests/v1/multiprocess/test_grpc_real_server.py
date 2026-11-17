@@ -91,6 +91,10 @@ def test_client_recovers_after_the_server_crashes(
         _wait_ready(client, server, log)
         # Stopping the process first keeps the call in flight when it dies.
         server.send_signal(signal.SIGSTOP)
+        # SIGSTOP takes effect asynchronously: under load the server can still
+        # answer a call made right after the signal, so wait until it stopped.
+        _, status = os.waitpid(server.pid, os.WUNTRACED)
+        assert os.WIFSTOPPED(status), log.read_text()
         in_flight = client.ping(1)
         time.sleep(0.5)  # let the request reach the stopped server
         server.kill()
