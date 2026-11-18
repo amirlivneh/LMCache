@@ -8,6 +8,7 @@ are stubbed.
 """
 
 # Standard
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any, Literal, cast
@@ -127,9 +128,12 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     return module
 
 
-def _bare_non_gpu_module() -> EngineDrivenTransferModule:
+@pytest.fixture
+def bare_non_gpu_module() -> Iterator[EngineDrivenTransferModule]:
     """Create an engine-driven module without hardware dependencies."""
-    return EngineDrivenTransferModule(MagicMock(name="ctx"))
+    module = EngineDrivenTransferModule(MagicMock(name="ctx"))
+    yield module
+    module.close()
 
 
 def _stub_gpu_registration_backend(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,10 +235,12 @@ def test_gpu_unregister_cleans_up() -> None:
     module.unregister_kv_cache(1)  # already gone -> no exception
 
 
-def test_non_gpu_reap_pops_strategy_as_pair() -> None:
+def test_non_gpu_reap_pops_strategy_as_pair(
+    bare_non_gpu_module: EngineDrivenTransferModule,
+) -> None:
     """Reaping a non-GPU entry pops its strategy in the same scan, keeping
     'strategy present iff entry present'."""
-    module = _bare_non_gpu_module()
+    module = bare_non_gpu_module
     old = time.monotonic() - 1000.0
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
         MagicMock(), "m", 1, old, True
@@ -252,10 +258,12 @@ def test_non_gpu_reap_pops_strategy_as_pair() -> None:
     assert 2 in module._strategies  # never-pinged survives on grace
 
 
-def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
+def test_non_gpu_resolve_for_transfer_refreshes_and_raises(
+    bare_non_gpu_module: EngineDrivenTransferModule,
+) -> None:
     """_resolve_for_transfer returns (entry, strategy) and refreshes
     last_seen; an unknown id raises ValueError."""
-    module = _bare_non_gpu_module()
+    module = bare_non_gpu_module
     module._engine_driven_contexts[1] = non_gpu_mod.EngineDrivenContextEntry(
         MagicMock(), "m", 1, 0.0, False
     )
