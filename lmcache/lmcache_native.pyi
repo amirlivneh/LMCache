@@ -106,7 +106,8 @@ class TTLLock:
     def lock(self) -> None:
         """
         Increment the lock counter by 1 and update the TTL.
-        If the previous TTL has expired, reset counter to 1.
+        The counter is never reset, also after the TTL expired, so a late
+        unlock() from an expired holder cannot release a newer holder.
         """
         ...
 
