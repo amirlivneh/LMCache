@@ -388,6 +388,34 @@ class StorageManager:
 
         # TODO: global key states update
 
+    @enable_tracing(redact=("l1_owners",))
+    def discard_write(
+        self,
+        keys: list[ObjectKey],
+        l1_owners: dict[ObjectKey, int],
+    ) -> None:
+        """Release write reservations whose objects were never written.
+
+        Use this instead of :meth:`finish_write` when the writer gives up
+        before filling the objects reserved by :meth:`reserve_write`. The
+        reserved objects are freed without ever becoming visible to readers
+        or being forwarded to L2, and a copy that is already resident is left
+        untouched.
+
+        Args:
+            keys (list[ObjectKey]): Reserved keys to drop.
+            l1_owners: The L1 manager each key was reserved in, built from the
+                reserved objects with :func:`l1_owners_of`.
+
+        Raises:
+            ValueError: ``l1_owners`` omits a key or names an unregistered L1
+                manager.
+        """
+        for owner, group in self._group_by_owner(keys, l1_owners).items():
+            self._l1_managers_by_id[owner].finish_write_and_delete(
+                group, tag=_L1_WRITE_TAG
+            )
+
     @contextmanager
     def read_prefetched_results(
         self,

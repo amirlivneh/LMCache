@@ -152,6 +152,16 @@ path keeps the same dict in its pending-write table. Existing staging and
 stream ordering retain allocations. The owner tag is neither a lifetime pin
 nor a write generation and adds no stale-callback or crash-recovery guarantee.
 
+`discard_write(keys, l1_owners)` is the abort side of the same pair. A writer
+that gives up before filling its reservations (a worker that disappears
+between an SHM `prepare_store` and `commit_store`, an inline chunk that fails
+validation) calls it instead of `finish_write`, and each owner frees its
+staging objects with `finish_write_and_delete`. Those objects never become
+resident, emit no write-finished notification and so are never forwarded to
+L2; a copy another writer already admitted is left untouched. Calling
+`finish_write` on an unwritten reservation would publish whatever bytes the
+buffer held as a cache hit.
+
 The owners are built inside the store's failure boundary before success is
 recorded. Invalid ownership skips admission and reports `MP_STORE_END` with
 zero stored objects. As with copy failures, staging reservations retain their

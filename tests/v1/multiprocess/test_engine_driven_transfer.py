@@ -2297,7 +2297,8 @@ def test_server_prepare_store_releases_unused_reserved_write_locks(
     assert isinstance(prepare_response, PrepareStoreResponse)
     assert prepare_response.context == {"slots": [], "chunk_indices": []}
     reserved_keys = mock_storage.reserve_write.call_args[0][0]
-    mock_storage.finish_write.assert_called_once_with(
+    mock_storage.finish_write.assert_not_called()
+    mock_storage.discard_write.assert_called_once_with(
         reserved_keys,
         l1_owners={k: memory_obj.get_l1_manager() for k in reserved_keys},
     )
@@ -2394,8 +2395,58 @@ def test_server_unregister_engine_driven_context_releases_pending_shm_locks(
 
     module.unregister_kv_cache(4)
 
-    mock_storage.finish_write.assert_called_once()
+    mock_storage.finish_write.assert_not_called()
+    mock_storage.discard_write.assert_called_once()
     mock_storage.finish_read_prefetched.assert_called_once()
+
+
+@pytest.mark.parametrize("worker_gone", ["unregister", "reap"])
+def test_server_drops_uncommitted_shm_store_when_worker_goes_away(
+    worker_gone: str,
+) -> None:
+    """A store the worker never committed must not become a cache hit.
+
+    ``prepare_store`` hands the worker SHM slots inside L1 buffers; only
+    ``commit_store`` says the worker finished copying into them. When the
+    worker unregisters or is reaped before committing, the reserved
+    buffers hold no data for these keys, so they must be dropped rather than
+    published to readers and L2.
+    """
+    # First Party
+    from lmcache.v1.distributed.error import L1Error
+    from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
+    from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
+        EngineDrivenTransferModule,
+    )
+
+    ctx = MPCacheServerContext(
+        storage_manager_config=_make_storage_manager_config(
+            shm_name=f"lmcache_l1_pool_uncommitted_{os.getpid()}_{worker_gone}",
+            pool_size=1 << 20,
+        ),
+        chunk_size=8,
+    )
+    module = EngineDrivenTransferModule(ctx)
+    try:
+        module.register_kv_cache_engine_driven_context(_default_register_payload())
+        key = _default_key()
+        assert module.prepare_store(key, 1).context["slots"]
+        obj_keys = ctx.resolve_obj_keys(key, [0])[0]
+
+        if worker_gone == "unregister":
+            module.unregister_kv_cache(1)
+        else:
+            module.touch_instance(1)
+            assert module.reap_stale_instances(0.0, 0.0) == [1]
+
+        l1 = ctx.storage_manager.l1_managers()[0]
+        results = l1.reserve_read(obj_keys)
+        assert [err for err, _ in results.values()] == [L1Error.KEY_NOT_EXIST] * len(
+            obj_keys
+        )
+    finally:
+        module.close()
+        ctx.close()
 
 
 def test_gather_paged_kv_with_chunk_indices_subset() -> None:

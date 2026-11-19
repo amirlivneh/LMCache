@@ -330,6 +330,12 @@ SHM stores and retrieve misses do not start transfers because the worker does
 not commit them. Failed commits and abandoned transfers (unregister, reaping,
 or shutdown) close their events with zero bytes and chunks.
 
+An abandoned SHM store is discarded, not admitted: only `commit_store` proves
+the worker finished copying into its slots, so unregister and reaping release
+the pending write reservations with `StorageManager.discard_write`. The same
+applies to reservations that never got a slot in `prepare_store` and to
+inline chunks that fail validation in `commit_store`.
+
 These are CPU-timestamped worker-handoff windows: they include worker
 gather/scatter, RPC and serialization, not pure device DMA. `device="cpu"`
 names the server endpoint, and `transfer_mode="engine_driven"` identifies

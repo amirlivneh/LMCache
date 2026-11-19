@@ -291,16 +291,15 @@ class InlineTransferStrategy(TransferStrategy):
                     l1_owners=l1_owners_of({k: reserved_dict[k] for k in written_keys}),
                 )
             # Release reservations that were never written so their write
-            # locks don't wedge later operations on the same keys, then drop
-            # the unwritten objects so they can never surface as cache hits.
+            # locks don't wedge later operations on the same keys; the
+            # unwritten objects must never surface as cache hits.
             written = set(written_keys)
             leftover = [k for k in reserved_dict if k not in written]
             if leftover:
-                self._storage_manager.finish_write(
+                self._storage_manager.discard_write(
                     leftover,
                     l1_owners=l1_owners_of({k: reserved_dict[k] for k in leftover}),
                 )
-                self._storage_manager.delete_l1_keys(leftover)
 
         success = len(written_keys) == len(reserved_dict)
         if not success:
@@ -552,8 +551,9 @@ class ShmTransferStrategy(TransferStrategy):
                 unused_keys = [
                     obj_key for obj_key in reserved if obj_key not in g_reserved_set
                 ]
+                # No slot was handed out for these, so nothing will fill them.
                 if unused_keys:
-                    self._storage_manager.finish_write(
+                    self._storage_manager.discard_write(
                         unused_keys, l1_owners={k: g_owners[k] for k in unused_keys}
                     )
             reserved_keys.extend(g_reserved)

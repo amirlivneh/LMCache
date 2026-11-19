@@ -276,9 +276,11 @@ class EngineDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
             write_owners = [self._pending_shm_writes.pop(k) for k in stale_writes]
             read_obj_keys = [self._pending_shm_reads.pop(k) for k in stale_reads]
 
+        # The worker never committed these stores, so the reserved buffers
+        # hold no data for their keys: drop them instead of admitting them.
         for owners in write_owners:
             if owners:
-                self._ctx.storage_manager.finish_write(
+                self._ctx.storage_manager.discard_write(
                     list(owners.keys()), l1_owners=owners
                 )
         for obj_keys in read_obj_keys:
