@@ -10,7 +10,8 @@ concrete classes in `lmcache/v1/distributed/l1_manager/` (see
 ## Shape
 
 - Members are exactly the calls the callers make today: reserve and finish
-  for writes and reads, including the combined `finish_write_and_reserve_read`
+  for writes and reads, capturing live epochs for deferred completions,
+  and the combined `finish_write_and_reserve_read`
   and `finish_write_and_delete`; `unsafe_read`, `delete`, `clear`,
   `touch_keys`, `is_key_evictable`, `register_listener`; `get_memory_usage`,
   `get_staging_memory_usage`, `get_capacity_bytes`, `get_l1_memory_desc`,
@@ -52,6 +53,19 @@ L1EvictionController, SerdeL2AdapterWrapper
 DramL1Manager DevDaxL1Manager GdsL1Manager
                  + hot-plug, owns_range
 ```
+
+## Deferred read completion
+
+The multiprocess transfer callback captures the L1 owner and the key's current
+read epoch before scheduling device work. A new epoch starts when the native
+read lock resets after its TTL or starts from a zero count. Overlapping
+readers in the same interval share an epoch and retain their existing count.
+
+The callback carries a key and epoch for each lock it will release.
+`finish_read` checks the epoch and decrements under the same L1 mutex. A
+late callback for an expired epoch cannot release the current reader's lock,
+even if the key was evicted and inserted again on the same L1. Epochs are
+local to each L1 manager and are separate from the external request protocol.
 
 ## Addressing a particular L1
 

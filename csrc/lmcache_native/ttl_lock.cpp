@@ -10,7 +10,7 @@ TTLLock::TTLLock(uint32_t ttl_sec)
       expiration_ms_(0),
       ttl_ms_(static_cast<int64_t>(ttl_sec) * 1000) {}
 
-void TTLLock::lock() {
+bool TTLLock::lock() {
   int64_t current_time = now_ms();
   int64_t new_expiration = current_time + ttl_ms_;
 
@@ -29,7 +29,7 @@ void TTLLock::lock() {
                                                  std::memory_order_seq_cst)) {
         // Successfully updated expiration, now set counter to 1
         counter_.store(1, std::memory_order_seq_cst);
-        return;
+        return true;
       }
       // Another thread updated expiration, retry
       continue;
@@ -39,7 +39,7 @@ void TTLLock::lock() {
                                            std::memory_order_seq_cst)) {
         // Successfully incremented counter, update expiration
         expiration_ms_.store(new_expiration, std::memory_order_seq_cst);
-        return;
+        return old_counter == 0;
       }
       // Another thread modified counter, retry
       continue;

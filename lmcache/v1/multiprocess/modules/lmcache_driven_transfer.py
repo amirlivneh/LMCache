@@ -27,7 +27,7 @@ from lmcache.v1.distributed.api import (
     ObjectKey,
     ShardReplicationDesc,
 )
-from lmcache.v1.distributed.storage_manager import L1WriteCompletion, l1_owners_of
+from lmcache.v1.distributed.storage_manager import L1ReadCompletion, l1_owners_of
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
@@ -278,7 +278,7 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
         self._device_host_func_dispatcher.register(
             "finish_read_by_owner",
             self._ctx.storage_manager.finish_read_by_owner,
-            payload_type=L1WriteCompletion,
+            payload_type=L1ReadCompletion,
         )
         self._device_host_func_dispatcher.register(
             "release_imported_event",

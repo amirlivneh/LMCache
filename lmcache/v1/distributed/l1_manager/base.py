@@ -3,7 +3,7 @@
 
 # Standard
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import count
 import threading
@@ -93,6 +93,9 @@ class L1ObjectState:
 
     is_temporary: bool
     """ Whether the object is temporary (need to be deleted after read). """
+
+    read_epoch: int = 0
+    """ Identity of the current live read interval, allocated by its L1. """
 
     staging_charge: int = 0
     """ Bytes added to the staging counter while the object is staged.
@@ -210,6 +213,7 @@ class BaseL1Manager(L1ManagerInterface):
         """
         self._config = config
         self._l1_manager_id = next_l1_manager_id()
+        self._read_epochs = count(1)
         self._lock = threading.Lock()
 
         # Resident objects: readable, never write-locked.
@@ -328,11 +332,7 @@ class BaseL1Manager(L1ManagerInterface):
                 ret[key] = (L1Error.KEY_NOT_EXIST, None)
                 continue
 
-            # TODO(perf): support a count argument in
-            # TTLLock.lock() to avoid Python for-loop
-            # overhead (TTLLock is C++ std::atomic).
-            for _ in range(total):
-                entry.read_lock.lock()
+            self._acquire_read_locks(entry, total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
             successful_keys.append(key)
 
@@ -378,10 +378,29 @@ class BaseL1Manager(L1ManagerInterface):
         return ret
 
     @l1_mgr_synchronized
+    def capture_read_epochs(self, keys: list[ObjectKey]) -> list[tuple[ObjectKey, int]]:
+        """Capture the live read epochs for a deferred completion.
+
+        Args:
+            keys: Keys for which the caller already owns read locks.
+
+        Returns:
+            Key and epoch in input order for each still-locked key.
+        """
+        return [
+            (key, entry.read_epoch)
+            for key in keys
+            if (entry := self._objects.get(key)) is not None
+            and entry.read_lock.is_locked()
+        ]
+
+    @l1_mgr_synchronized
     def finish_read(
         self,
         keys: list[ObjectKey],
         read_locks: int = 1,
+        *,
+        expected_epochs: Mapping[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
         """Finish read access for the given keys.
 
@@ -396,6 +415,8 @@ class BaseL1Manager(L1ManagerInterface):
                 default); the reservation owner releasing the
                 whole reservation passes the ``reserve_read``
                 total.
+            expected_epochs: If supplied, finish only the live epoch captured
+                for each key. Stale completions leave the current lock alone.
 
         Returns:
             A dictionary mapping each object key to an
@@ -403,8 +424,8 @@ class BaseL1Manager(L1ManagerInterface):
 
         Errors:
             KEY_NOT_EXIST: The key does not exist.
-            KEY_IN_WRONG_STATE: The key is not read-locked, which
-                means the reader may read inconsistent data.
+            KEY_IN_WRONG_STATE: The key is no longer read-locked or its live
+                epoch differs from the captured epoch.
         """
         total = validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
@@ -414,6 +435,11 @@ class BaseL1Manager(L1ManagerInterface):
 
         for key in keys:
             entry = self._objects.get(key, None)
+            if expected_epochs is not None and (
+                entry is None or entry.read_epoch != expected_epochs[key]
+            ):
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
             if entry is None:
                 logger.warning(
                     "L1Manager: finish read on non-existing key %s, "
@@ -732,8 +758,7 @@ class BaseL1Manager(L1ManagerInterface):
                 discarded.append(entry.memory_obj)
                 resident_keys.append(key)
                 entry = resident
-            for _ in range(total):
-                entry.read_lock.lock()
+            self._acquire_read_locks(entry, total)
             ret[key] = (L1Error.SUCCESS, entry.memory_obj)
 
         self._memory_manager.free(discarded)
@@ -1236,6 +1261,12 @@ class BaseL1Manager(L1ManagerInterface):
             freed.append(self._pop_staging(key, tag).memory_obj)
         self._memory_manager.free(freed)
         return len(freed)
+
+    def _acquire_read_locks(self, entry: L1ObjectState, total: int) -> None:
+        """Allocate a fresh identity when the native lock resets its count."""
+        for _ in range(total):
+            if entry.read_lock.lock_and_report_new_epoch():
+                entry.read_epoch = next(self._read_epochs)
 
     def _report_read_reserved(self, keys: list[ObjectKey]) -> None:
         """Notify listeners and the event bus that ``keys`` got read locks."""

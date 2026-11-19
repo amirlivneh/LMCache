@@ -5,6 +5,7 @@ Class for distributed storage manager internal API data structures
 
 # Standard
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import enum
@@ -290,10 +291,18 @@ class L1ManagerInterface(Protocol):
         """Return already read-locked objects without new locks."""
         ...
 
+    def capture_read_epochs(self, keys: list[ObjectKey]) -> list[tuple[ObjectKey, int]]:
+        """Capture live key/epoch pairs for a deferred completion."""
+        ...
+
     def finish_read(
-        self, keys: list[ObjectKey], read_locks: int = 1
+        self,
+        keys: list[ObjectKey],
+        read_locks: int = 1,
+        *,
+        expected_epochs: Mapping[ObjectKey, int] | None = None,
     ) -> dict[ObjectKey, L1Error]:
-        """Release ``read_locks`` read locks on each key."""
+        """Release read locks, optionally constrained to captured epochs."""
         ...
 
     def reserve_write(

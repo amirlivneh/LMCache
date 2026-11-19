@@ -100,9 +100,8 @@ logger = init_logger(__name__)
 # tag makes concurrent stores of the same key exclude each other.
 _L1_WRITE_TAG = "storage_manager"
 
-# Owner/key groups of the deprecated read-completion API (see
-# ``prepare_read_completion``). No MemoryObj or device pointer crosses msgpack.
-L1WriteCompletion = list[tuple[int, list[ObjectKey]]]
+# Process-local callback payload: owner ID and each key's live read epoch.
+L1ReadCompletion = list[tuple[int, list[tuple[ObjectKey, int]]]]
 
 _DEVDAX_L1_TAGS = MemoryTags(segment=MemorySegment.CXL, residency=MemoryResidency.LOCAL)
 
@@ -523,17 +522,7 @@ class StorageManager:
                 reservation when releasing a lookup's locks).
         """
         finish_result = self._finish_read_objects(keys, read_locks, l1_owners)
-        successful_keys = [k for k, e in finish_result.items() if e == L1Error.SUCCESS]
-        failed_keys = [k for k, e in finish_result.items() if e != L1Error.SUCCESS]
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
-                metadata={
-                    "succeeded_keys": successful_keys,
-                    "failed_keys": failed_keys,
-                },
-            )
-        )
+        self._report_read_finished(finish_result)
 
     @enable_tracing()
     def submit_prefetch_task(
@@ -1375,8 +1364,8 @@ class StorageManager:
         self,
         keys: list[ObjectKey],
         l1_owners: dict[ObjectKey, int] | None = None,
-    ) -> L1WriteCompletion:
-        """Capture exact read owners for stream-ordered completion.
+    ) -> L1ReadCompletion:
+        """Capture read owners and live epochs before queuing device work.
 
         Args:
             keys: Keys whose read locks the caller owns from prefetch.
@@ -1384,18 +1373,21 @@ class StorageManager:
                 the owners by probing the L1s.
 
         Returns:
-            Serializable owner/key groups.
+            Serializable owner groups of key/epoch pairs.
 
         Raises:
             ValueError: ``l1_owners`` omits a key or names an unregistered
                 L1 manager.
         """
-        return list(self._read_groups(keys, l1_owners).items())
+        return [
+            (owner, self._l1_managers_by_id[owner].capture_read_epochs(group))
+            for owner, group in self._read_groups(keys, l1_owners).items()
+        ]
 
     # TODO(ApostaC): refactor the read-completion callers and drop this method.
     @lmcache_deprecate("this method will be dropped in a future refactor")
-    def finish_read_by_owner(self, completion: L1WriteCompletion) -> None:
-        """Release one read lock per key on its captured owner after device use.
+    def finish_read_by_owner(self, completion: L1ReadCompletion) -> None:
+        """Release one read lock per key in its captured epoch after device use.
 
         Args:
             completion: Groups produced by prepare_read_completion.
@@ -1405,12 +1397,40 @@ class StorageManager:
         """
         if any(owner not in self._l1_managers_by_id for owner, _ in completion):
             raise ValueError("Read completion requires a registered L1 owner")
-        if not self.is_multi_l1:
-            # Keep single-L1 traces portable across process-local owner IDs.
-            self.finish_read_prefetched([key for _, keys in completion for key in keys])
-            return
-        for owner, keys in completion:
-            self.finish_read_prefetched(keys, l1_owners=dict.fromkeys(keys, owner))
+        for owner, pairs in completion:
+            keys = [key for key, _ in pairs]
+            manager = self._l1_managers_by_id[owner]
+            result = manager.finish_read(keys, expected_epochs=dict(pairs))
+            if is_tracing_enabled():
+                # Replay uses its own owners and epochs; only record real releases.
+                released = [key for key in keys if result[key] == L1Error.SUCCESS]
+                if released:
+                    publish_call_event(
+                        "lmcache.v1.distributed.storage_manager."
+                        "StorageManager.finish_read_prefetched",
+                        {"keys": released, "read_locks": 1},
+                    )
+            self._report_read_finished(result)
+
+    def _report_read_finished(self, results: dict[ObjectKey, L1Error]) -> None:
+        """Publish the outcomes of an L1 read completion batch."""
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.SM_READ_PREFETCHED_FINISHED,
+                metadata={
+                    "succeeded_keys": [
+                        key
+                        for key, error in results.items()
+                        if error == L1Error.SUCCESS
+                    ],
+                    "failed_keys": [
+                        key
+                        for key, error in results.items()
+                        if error != L1Error.SUCCESS
+                    ],
+                },
+            )
+        )
 
     def _group_by_owner(
         self, keys: list[ObjectKey], owners: Mapping[ObjectKey, int]

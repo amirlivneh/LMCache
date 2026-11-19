@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
 import logging
+import time
 
 # Third Party
 import msgspec
@@ -31,7 +32,11 @@ from lmcache.v1.distributed.config import (
 from lmcache.v1.distributed.error import L1Error, L1ReconfigureError
 from lmcache.v1.distributed.internal_api import L1ManagerInterface
 from lmcache.v1.distributed.l1_manager.base import BaseL1Manager
-from lmcache.v1.distributed.storage_manager import StorageManager, l1_owners_of
+from lmcache.v1.distributed.storage_manager import (
+    L1ReadCompletion,
+    StorageManager,
+    l1_owners_of,
+)
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.trace import codecs
 from lmcache.v1.mp_observability.trace import decorator as trace_decorator
@@ -71,11 +76,13 @@ def storage_factory(monkeypatch: pytest.MonkeyPatch) -> Iterator[StorageFactory]
     def create(
         sizes: tuple[int, ...] = (4096, 4096),
         write_policy: str = "default",
+        read_ttl_seconds: int = 300,
     ) -> tuple[StorageManager, tuple[BaseL1Manager, ...]]:
         configs = [
             L1ManagerConfig(
                 L1MemoryManagerConfig(size_in_bytes=size, use_lazy=False, shm_name=""),
                 tag="_default" if index == 0 else f"l1-{index}",
+                read_ttl_seconds=read_ttl_seconds,
             )
             for index, size in enumerate(sizes)
         ]
@@ -482,6 +489,46 @@ def test_overlapping_reads_preserve_each_selected_owner(
     assert fallback.report_status()["read_locked_count"] == 0
 
 
+@pytest.mark.parametrize("replace_object", [False, True], ids=["same", "replaced"])
+def test_stale_read_completion_preserves_fresh_prefetch(
+    storage_factory: StorageFactory, replace_object: bool
+) -> None:
+    """An expired completion cannot delete a newer reader's L1 allocation."""
+    store, (manager,) = storage_factory((4096,), read_ttl_seconds=1)
+    keys = [key(1)]
+    objects = store.reserve_write(keys, LAYOUT)
+    assert set(objects) == set(keys)
+    store.finish_write(keys, l1_owners_of(objects))
+    spec = single_row_spec(keys, LAYOUT, allowed_l2_memory_tags=frozenset())
+
+    first = store.query_prefetch_status(store.submit_prefetch_task(spec))
+    assert first is not None and first.l1_hit_count == 1
+    stale = msgspec.msgpack.decode(
+        msgspec.msgpack.encode(store.prepare_read_completion(keys, first.l1_owners)),
+        type=L1ReadCompletion,
+    )
+    assert not manager.is_key_evictable(keys[0])
+    deadline = time.monotonic() + 5
+    while not manager.is_key_evictable(keys[0]):
+        assert time.monotonic() < deadline, "first read reservation did not expire"
+        time.sleep(0.01)
+
+    if replace_object:
+        assert manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+        objects = store.reserve_write(keys, LAYOUT)
+        assert set(objects) == set(keys)
+        store.finish_write(keys, l1_owners_of(objects))
+
+    second = store.query_prefetch_status(store.submit_prefetch_task(spec))
+    assert second is not None and second.l1_hit_count == 1
+    fresh = store.prepare_read_completion(keys, second.l1_owners)
+    assert not manager.is_key_evictable(keys[0])
+    store.finish_read_by_owner(stale)
+    assert manager.delete(keys)[keys[0]] == L1Error.KEY_IS_LOCKED
+    store.finish_read_by_owner(fresh)
+    assert manager.delete(keys)[keys[0]] == L1Error.SUCCESS
+
+
 def test_failed_peer_lookup_releases_earlier_locks(
     storage_factory: StorageFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -507,7 +554,9 @@ def test_combined_read_completion_keeps_duplicate_key_owners(
         manager.reserve_write([key(1)], [False], LAYOUT)
         manager.finish_write([key(1)])
         manager.reserve_read([key(1)])
-        completion.append((manager.l1_manager_id, [key(1)]))
+        completion.extend(
+            store.prepare_read_completion([key(1)], {key(1): manager.l1_manager_id})
+        )
     store.finish_read_by_owner(completion)
     assert all(
         manager.report_status()["read_locked_count"] == 0 for manager in managers

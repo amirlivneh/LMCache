@@ -36,8 +36,9 @@ class TTLLock {
    * If the previous TTL has expired, the counter is reset to 1.
    * Otherwise, the counter is incremented by 1.
    * The TTL is always refreshed to the current time + TTL duration.
+   * @return true if this starts a new epoch after expiry or a zero count.
    */
-  void lock();
+  bool lock();
 
   /**
    * @brief Decrement the lock counter by 1.

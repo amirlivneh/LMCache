@@ -168,9 +168,12 @@ PYBIND11_MODULE(lmcache_native, m) {
       .def(py::init<uint32_t>(), py::arg("ttl_second") = 300,
            "Construct a TTLLock with the specified TTL duration in "
            "seconds. Default is 300 seconds.")
-      .def("lock", &TTLLock::lock,
-           "Increment the lock counter by 1 and update the TTL. "
-           "If the previous TTL has expired, reset counter to 1.")
+      .def(
+          "lock", [](TTLLock& lock) { lock.lock(); },
+          "Increment the lock counter by 1 and update the TTL. "
+          "If the previous TTL has expired, reset counter to 1.")
+      .def("lock_and_report_new_epoch", &TTLLock::lock,
+           "Acquire a lock and report whether it starts a new live epoch.")
       .def("unlock", &TTLLock::unlock,
            "Decrement the lock counter by 1 (minimum 0).")
       .def("is_locked", &TTLLock::is_locked,

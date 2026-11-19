@@ -115,6 +115,9 @@ class TTLLock:
         """
         ...
 
+    def lock_and_report_new_epoch(self) -> bool:
+        """Acquire a lock and report whether it starts a new live epoch."""
+
     def unlock(self) -> None:
         """Decrement the lock counter by 1 (minimum 0)."""
         ...
