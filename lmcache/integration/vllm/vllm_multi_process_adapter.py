@@ -1027,10 +1027,12 @@ class LMCacheMPSchedulerAdapter:
         Args:
             request_id: The ID of the finished request.
         """
+        lookup = self._lookups.pop(request_id, None)
         if not self.is_healthy:
+            if lookup is not None:
+                lookup.close()
             return
 
-        lookup = self._lookups.get(request_id)
         if lookup is not None:
             url = lookup.drain()
             if url is not None:

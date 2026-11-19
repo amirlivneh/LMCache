@@ -1796,16 +1796,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # Drop lookup state for a request aborted before its lookup was
-        # consumed (update_state_after_alloc never ran for it). Both the eager
-        # and the lazy path need this, so it runs before they diverge.
-        self.scheduler_adapter.cleanup_lookup_result(request.request_id)
-
         if self.lazy_offload:
             # Blocks return to the free queue (False) and remain observable;
             # the manager ends the LMCache session after all deferred stores
             # have either completed or been dropped.
             actions = self._lazy_offload_manager.on_request_finished(request.request_id)
+            if request.request_id not in actions.sessions_to_end:
+                self.scheduler_adapter.cleanup_lookup_result(request.request_id)
             for request_id in actions.sessions_to_end:
                 self.scheduler_adapter.end_session(request_id)
             return False, (return_params or None)
@@ -1817,7 +1814,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             delay_free or request.request_id in self._pinned_boundary_state_blocks
         )
 
-        # Notify LMCache to end the session for this request
+        # Keep the lookup handle until teardown can drain any RPC in flight.
         self.scheduler_adapter.end_session(request.request_id)
         if delay_free:
             self._delay_free_req_ids.add(request.request_id)

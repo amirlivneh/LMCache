@@ -627,6 +627,7 @@ class PrefetchController(StorageControllerInterface):
         # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
+        self._pending_result_ids: set[PrefetchRequestId] = set()
         self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
@@ -715,12 +716,19 @@ class PrefetchController(StorageControllerInterface):
             request_id = self._next_request_id
             self._next_request_id += 1
 
+        with self._prefetch_results_lock:
+            self._pending_result_ids.add(request_id)
+
         allows_no_l2 = spec.allowed_l2_memory_tags == frozenset()
         if allows_no_l2 or not self._l2_adapters:
-            request = _build_request(request_id, spec)
-            self._lock_l1_keys(request)
-            self._plan_load(request, {})
-            self._finish_request(request)
+            try:
+                request = _build_request(request_id, spec)
+                self._lock_l1_keys(request)
+                self._plan_load(request, {})
+                self._finish_request(request)
+            finally:
+                with self._prefetch_results_lock:
+                    self._pending_result_ids.discard(request_id)
             return request_id
 
         with self._submission_lock:
@@ -744,10 +752,24 @@ class PrefetchController(StorageControllerInterface):
         Returns:
             The hit cells, one row per key group, with the number of them
             served from L1 and loaded from L2. None if not yet complete or
-            already retrieved.
+            already retrieved or discarded.
         """
         with self._prefetch_results_lock:
             return self._completed_results.pop(request_id, None)
+
+    def discard_prefetch_result(self, request_id: PrefetchRequestId) -> None:
+        """Discard a prefetch result and suppress later publication.
+
+        In-flight requests still complete through the normal adapter lifecycle.
+        Any retained anonymous L1 read locks expire through their normal TTL.
+
+        Args:
+            request_id: ID returned by submit_prefetch_request.
+        """
+        with self._prefetch_results_cv:
+            self._pending_result_ids.discard(request_id)
+            self._completed_results.pop(request_id, None)
+            self._prefetch_results_cv.notify_all()
 
     def wait_prefetch_result(
         self, request_id: PrefetchRequestId, timeout: float
@@ -765,12 +787,13 @@ class PrefetchController(StorageControllerInterface):
 
         Returns:
             True if the result became available within the timeout, False if
-            the wait timed out.
+            the wait timed out or the result can no longer be retrieved.
         """
         with self._prefetch_results_cv:
-            return self._prefetch_results_cv.wait_for(
-                lambda: request_id in self._completed_results, timeout=timeout
+            self._prefetch_results_cv.wait_for(
+                lambda: request_id not in self._pending_result_ids, timeout=timeout
             )
+            return request_id in self._completed_results
 
     def report_status(self) -> dict:
         """Return a status dict for the prefetch controller."""
@@ -881,6 +904,9 @@ class PrefetchController(StorageControllerInterface):
         self._submission_efd.notify()
         self._thread.join()
         self._cleanup_in_flight_requests()
+        with self._prefetch_results_cv:
+            self._pending_result_ids.clear()
+            self._prefetch_results_cv.notify_all()
         self._submission_efd.close()
         self._adapter_ctrl_efd.close()
 
@@ -1765,11 +1791,12 @@ class PrefetchController(StorageControllerInterface):
     def _publish_result(
         self, request: InFlightPrefetchRequest, result: PrefetchResult
     ) -> None:
-        """Store the request's result and wake any waiter."""
-        with self._prefetch_results_lock:
-            self._completed_results[request.request_id] = result
-            # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
-            self._prefetch_results_cv.notify_all()
+        """Publish a result if its caller is still interested, then wake waiters."""
+        with self._prefetch_results_cv:
+            if request.request_id in self._pending_result_ids:
+                self._pending_result_ids.remove(request.request_id)
+                self._completed_results[request.request_id] = result
+                self._prefetch_results_cv.notify_all()
 
     def _abort_request(self, request: InFlightPrefetchRequest) -> None:
         """Give up on a request after an error: return everything it holds,

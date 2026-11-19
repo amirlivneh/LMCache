@@ -614,6 +614,17 @@ class StorageManager:
             )
         return result
 
+    def discard_prefetch_result(self, handle: PrefetchHandle) -> None:
+        """Abandon a result without interrupting in-flight adapter work.
+
+        Args:
+            handle: Handle returned by submit_prefetch_task.
+        """
+        if handle.prefetch_request_id != -1:
+            self._prefetch_controller.discard_prefetch_result(
+                handle.prefetch_request_id
+            )
+
     def wait_prefetch_status(
         self,
         handle: PrefetchHandle,
@@ -630,8 +641,8 @@ class StorageManager:
             timeout: Maximum number of seconds to wait for the result.
 
         Returns:
-            True if a result is available within the timeout, False if the
-            wait timed out.
+            True if a result is available within the timeout. False if the
+            wait timed out or the result can no longer be retrieved.
         """
         if handle.prefetch_request_id == -1:
             return True

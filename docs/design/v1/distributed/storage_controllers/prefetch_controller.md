@@ -70,6 +70,7 @@ PrefetchController(l1_managers, l1_manager_descriptors,
 submit_prefetch_request(spec: PrefetchTaskSpec) -> PrefetchRequestId
 query_prefetch_result(request_id) -> PrefetchResult | None   # consume-once
 wait_prefetch_result(request_id, timeout) -> bool            # does not consume
+discard_prefetch_result(request_id)                         # abandon delivery
 add_adapter(adapter_id, adapter, descriptor) / request_remove_adapter(adapter_id)
 start() / stop()
 ```
@@ -85,6 +86,16 @@ background loop and admitted in arrival order under the in-flight watermark
 `key_groups` order), split into the disjoint `l1_hit_cells` (L1 already held
 them) and `l2_hit_cells` (loaded by this request). Under `LOCK` every hit cell
 is read-locked its row's `num_kv_readers` times for the caller.
+
+### Abandoned results
+
+When a multiprocess request ends before consuming its lookup, its server-side
+lookup job is removed and the controller discards the result. Discard and
+publication share the result mutex. A completed result is removed immediately.
+For a pending result, the controller removes the request's eligibility to
+publish and wakes waiters. It still lets adapter tasks and staging buffers go
+through their usual lifecycle. A retained anonymous L1 read lock is left to its
+TTL, since a late decrement could release a newer reader's lock.
 
 ## Admission
 

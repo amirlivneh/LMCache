@@ -2,7 +2,8 @@
 """LookupModule: lookup, prefetch polling, and session lifecycle."""
 
 # Standard
-from dataclasses import dataclass, replace
+from _thread import LockType
+from dataclasses import dataclass, field, replace
 from functools import partial
 import threading
 import time
@@ -16,6 +17,7 @@ from lmcache.v1.common.token_hasher import TokenHasher
 from lmcache.v1.distributed.api import (
     ObjectKey,
     PrefetchHandle,
+    PrefetchResult,
     PrefetchTaskSpec,
     ipc_key_to_grouped_object_keys,
     ipc_key_to_object_keys,
@@ -137,6 +139,7 @@ class _PrefetchJob:
     # The lookup key, for the unfull-chunk stage that runs once the hit is
     # known; None on early exits, which never probe an unfull chunk.
     unfull_chunk_lookup_key: IPCCacheServerKey | None = None
+    handoff_lock: LockType = field(default_factory=threading.Lock, repr=False)
 
 
 class LookupModule(DiscoverableModule):
@@ -609,7 +612,7 @@ class LookupModule(DiscoverableModule):
 
     @request_handler(HandlerType.BLOCKING)
     def end_session(self, request_id: str) -> None:
-        """Remove the session for a finished request.
+        """Remove the session and any unconsumed lookup for a finished request.
 
         Args:
             request_id: The request ID whose session should be removed.
@@ -620,6 +623,11 @@ class LookupModule(DiscoverableModule):
                 metadata={"request_id": request_id},
             )
         )
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.pop(request_id, None)
+        if job is not None:
+            with job.handoff_lock:
+                self._ctx.storage_manager.discard_prefetch_result(job.handle)
         session = self._ctx.session_manager.remove(request_id)
         self._ctx.event_bus.publish(
             Event(
@@ -761,9 +769,21 @@ class LookupModule(DiscoverableModule):
             None while the prefetch is still running (the job is kept so a
             later call can resolve it).
         """
-        result = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if result is None:
-            return None
+        with job.handoff_lock:
+            with self._prefetch_job_lock:
+                if self._prefetch_jobs.get(job.request_id) is not job:
+                    return 0
+            result = self._ctx.storage_manager.query_prefetch_status(job.handle)
+            if result is None:
+                return None
+            hit_tokens = self._record_prefetch_result(job, result)
+            with self._prefetch_job_lock:
+                if self._prefetch_jobs.get(job.request_id) is job:
+                    del self._prefetch_jobs[job.request_id]
+            return hit_tokens
+
+    def _record_prefetch_result(self, job: _PrefetchJob, result: PrefetchResult) -> int:
+        """Record a consumed prefetch on its session and publish its metrics."""
         if job.row_windows:
             found_count, _retain = fold_unfold_grouped(
                 result.hit_cells, job.row_windows
@@ -837,9 +857,6 @@ class LookupModule(DiscoverableModule):
                 },
             )
         )
-
-        with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(job.request_id, None)
 
         return unfull_chunk_boundary or found_count * job.chunk_size
 
