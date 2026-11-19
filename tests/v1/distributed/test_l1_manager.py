@@ -2303,6 +2303,43 @@ class TestStagingEviction:
 
         manager.close()
 
+    @pytest.mark.parametrize("drop_resident", ["temp_read_out", "clear"])
+    def test_eviction_policy_keeps_key_another_tag_still_stages(
+        self, short_write_ttl_l1_config, basic_layout, drop_resident
+    ):
+        """Dropping the resident object must not drop a key another tag still
+        stages from the policy: once that reservation is abandoned, eviction
+        has to find and reclaim it."""
+        manager = DramL1Manager(short_write_ttl_l1_config)
+        policy = LRUEvictionPolicy()
+        manager.register_listener(L1EvictionPolicy(policy))
+        key = make_object_key(1)
+        temporary = drop_resident == "temp_read_out"
+        manager.reserve_write([key], [False], basic_layout, tag="slow")
+        manager.reserve_write([key], [temporary], basic_layout, tag="fast")
+
+        # "fast" lands first; its resident object goes away while "slow"
+        # still stages the key.
+        if temporary:
+            manager.finish_write_and_reserve_read([key], tag="fast")
+            manager.finish_read([key])
+        else:
+            manager.finish_write([key], tag="fast")
+            manager.clear(force=False)
+        assert manager.get_object_state(key) is None
+
+        # "slow" stalls past its write TTL: its buffer is now reclaimable.
+        time.sleep(1.2)
+        actions = policy.get_eviction_actions(
+            1.0, key_eligible_filter=manager.is_key_evictable
+        )
+        evicted = [k for a in actions for k in a.keys]
+        assert evicted == [key]
+        assert manager.delete(evicted)[key] == L1Error.SUCCESS
+        assert manager.get_staging_memory_usage() == 0
+
+        manager.close()
+
     def test_eviction_policy_forgets_discarded_reservation(
         self, basic_l1_config, basic_layout
     ):

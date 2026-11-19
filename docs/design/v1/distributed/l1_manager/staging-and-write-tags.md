@@ -72,7 +72,14 @@ and controllers only ever see original keys; tags never leave the manager.
 | admission lost to a resident object | `on_l1_keys_reserved_read` (only for `_and_reserve_read`) | `L1_READ_RESERVED` |
 | staging discarded / reclaimed, key still resident or still staged | none | none (debug log) |
 | staging discarded / reclaimed, key now absent | `on_l1_keys_deleted_by_manager` | none |
-| resident object deleted | `on_l1_keys_deleted_by_manager` | `L1_KEYS_EVICTED` |
+| resident object deleted, key now absent | `on_l1_keys_deleted_by_manager` | `L1_KEYS_EVICTED` |
+| resident object deleted, key still staged | none | `L1_KEYS_EVICTED` |
+
+Listeners hear `on_l1_keys_deleted_by_manager` only once nothing is left for
+the key, including when a temporary object is freed by `finish_read` or
+`clear()` drops a resident object: while another writer still stages the key,
+the eviction policy must keep tracking it, or an abandoned reservation would
+never be proposed for eviction.
 
 Discards are deliberately not published as `L1_KEYS_EVICTED`: the coordinator
 cache-event reporter and the L1 byte metrics treat that event as the deletion

@@ -448,9 +448,10 @@ class BaseL1Manager(L1ManagerInterface):
         freed_meta = [self._object_meta(obj) for obj in need_to_free]
         self._memory_manager.free(need_to_free)
 
+        gone_keys = self._without_staging(need_to_free_keys)
         for listener in self._registered_listeners:
             listener.on_l1_keys_read_finished(successful_keys)
-            listener.on_l1_keys_deleted_by_manager(need_to_free_keys)
+            listener.on_l1_keys_deleted_by_manager(gone_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_READ_FINISHED,
@@ -1265,18 +1266,28 @@ class BaseL1Manager(L1ManagerInterface):
         objs: list[MemoryObj],
     ) -> None:
         """Free ``objs`` and report ``keys`` as deleted to listeners and
-        the event bus."""
+        the event bus.
+
+        Listeners only hear about keys no staging object remains for: a key
+        another writer still stages stays tracked so that eviction can
+        reclaim that reservation if it is abandoned.
+        """
         freed_meta = [self._object_meta(obj) for obj in objs]
         self._memory_manager.free(objs)
 
+        gone_keys = self._without_staging(keys)
         for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(keys)
+            listener.on_l1_keys_deleted_by_manager(gone_keys)
         self._event_bus.publish(
             Event(
                 event_type=EventType.L1_KEYS_EVICTED,
                 metadata={"l1_tag": self._config.tag, "keys": keys, "meta": freed_meta},
             )
         )
+
+    def _without_staging(self, keys: list[ObjectKey]) -> list[ObjectKey]:
+        """Return the ``keys`` that no writer stages any more."""
+        return [key for key in keys if key not in self._staging]
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""
