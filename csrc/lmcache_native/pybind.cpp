@@ -130,7 +130,7 @@ PYBIND11_MODULE(lmcache_native, m) {
            "seconds. Default is 300 seconds.")
       .def("lock", &TTLLock::lock,
            "Increment the lock counter by 1 and update the TTL. "
-           "If the previous TTL has expired, reset counter to 1.")
+           "The counter is never reset, also after the TTL expired.")
       .def("unlock", &TTLLock::unlock,
            "Decrement the lock counter by 1 (minimum 0).")
       .def("is_locked", &TTLLock::is_locked,

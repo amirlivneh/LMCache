@@ -145,25 +145,25 @@ class TestTTLLockTTLSemantics:
         time.sleep(1.0)  # Now 2.5s from last lock > 2s TTL
         assert not lock.is_locked()
 
-    def test_lock_after_ttl_expired_resets_counter(self):
-        """Test that lock() after TTL expires resets counter to 1."""
+    def test_late_unlock_after_ttl_expired_keeps_new_holder(self):
+        """An expired holder's late unlock() must not release a new holder.
+
+        lock() after expiry keeps the counter instead of resetting it, so the
+        expired holder's count is still there for its own late unlock().
+        """
         lock = TTLLock(ttl_second=1)
 
-        # Lock multiple times
-        lock.lock()
-        lock.lock()
-        lock.lock()
-
-        # Wait for TTL to expire
+        lock.lock()  # holder A
         time.sleep(1.5)
         assert not lock.is_locked()
 
-        # Lock again - should reset counter and be locked
-        lock.lock()
+        lock.lock()  # holder B, fresh TTL
         assert lock.is_locked()
 
-        # Verify counter was reset by unlocking once
-        lock.unlock()
+        lock.unlock()  # A, late
+        assert lock.is_locked()
+
+        lock.unlock()  # B
         assert not lock.is_locked()
 
     def test_default_ttl_is_300_seconds(self):

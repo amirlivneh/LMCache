@@ -11,40 +11,13 @@ TTLLock::TTLLock(uint32_t ttl_sec)
       ttl_ms_(static_cast<int64_t>(ttl_sec) * 1000) {}
 
 void TTLLock::lock() {
-  int64_t current_time = now_ms();
-  int64_t new_expiration = current_time + ttl_ms_;
-
-  // Use compare-and-swap loop to handle the TTL expiration case
-  while (true) {
-    int64_t old_expiration = expiration_ms_.load(std::memory_order_acquire);
-    int64_t old_counter = counter_.load(std::memory_order_acquire);
-
-    // Check if TTL has expired
-    bool expired = (current_time >= old_expiration);
-
-    if (expired) {
-      // TTL expired, try to reset counter to 1 and set new expiration
-      // First, try to update the expiration
-      if (expiration_ms_.compare_exchange_strong(old_expiration, new_expiration,
-                                                 std::memory_order_seq_cst)) {
-        // Successfully updated expiration, now set counter to 1
-        counter_.store(1, std::memory_order_seq_cst);
-        return;
-      }
-      // Another thread updated expiration, retry
-      continue;
-    } else {
-      // TTL not expired, try to increment counter
-      if (counter_.compare_exchange_strong(old_counter, old_counter + 1,
-                                           std::memory_order_seq_cst)) {
-        // Successfully incremented counter, update expiration
-        expiration_ms_.store(new_expiration, std::memory_order_seq_cst);
-        return;
-      }
-      // Another thread modified counter, retry
-      continue;
-    }
-  }
+  // Never reset the counter when the TTL has expired. An expired holder can
+  // still call unlock() later; with a reset, that late unlock() would remove
+  // the new holder's count and release a lock that is still in use. Counts
+  // left by holders that never unlock only delay release until the TTL runs
+  // out, which is the TTL's purpose.
+  counter_.fetch_add(1, std::memory_order_seq_cst);
+  expiration_ms_.store(now_ms() + ttl_ms_, std::memory_order_seq_cst);
 }
 
 void TTLLock::unlock() {

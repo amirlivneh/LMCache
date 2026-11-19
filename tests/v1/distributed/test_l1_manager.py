@@ -141,6 +141,16 @@ def short_write_ttl_l1_config(basic_memory_config):
 
 
 @pytest.fixture
+def short_read_ttl_l1_config(basic_memory_config):
+    """L1ManagerConfig whose read locks expire after one second."""
+    return L1ManagerConfig(
+        memory_config=basic_memory_config,
+        write_ttl_seconds=600,
+        read_ttl_seconds=1,
+    )
+
+
+@pytest.fixture
 def basic_layout():
     """Create a basic MemoryLayoutDesc for testing."""
     return MemoryLayoutDesc(
@@ -780,6 +790,62 @@ class TestFinishRead:
         # Release remaining 2 -> deleted
         manager.finish_read([key], read_locks=2)
         assert manager.get_object_state(key) is None
+
+        manager.close()
+
+    @pytest.mark.parametrize("temporary", [False, True], ids=["resident", "temp"])
+    def test_late_finish_read_keeps_a_newer_readers_lock(
+        self, short_read_ttl_l1_config, basic_layout, temporary
+    ):
+        """A reader whose lock expired must not release a newer reader's lock.
+
+        Reader A's lock expires, reader B reserves the key, then A calls
+        finish_read late. B is still inside its TTL, so the key must stay
+        read-locked (not deletable) and, for a temporary object, must not be
+        freed under B.
+        """
+        manager = DramL1Manager(short_read_ttl_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [temporary], basic_layout)
+        manager.finish_write([key])
+
+        assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS  # A
+        time.sleep(1.2)
+        err, obj_b = manager.reserve_read([key])[key]  # B
+        assert err == L1Error.SUCCESS
+        manager.finish_read([key])  # A, after its lock expired
+
+        assert manager.unsafe_read([key])[key][0] == L1Error.SUCCESS
+        assert obj_b.is_valid()
+        assert manager.delete([key])[key] == L1Error.KEY_IS_LOCKED
+
+        manager.close()
+
+    @pytest.mark.parametrize("temporary", [False, True], ids=["resident", "temp"])
+    def test_expired_reader_leaves_no_lock_behind(
+        self, short_read_ttl_l1_config, basic_layout, temporary
+    ):
+        """An expired reader that finishes late must not keep the key locked.
+
+        Its finish_read reports KEY_IN_WRONG_STATE, and once the next reader
+        finishes nobody holds the key: a temporary object is freed and a
+        resident one can be deleted.
+        """
+        manager = DramL1Manager(short_read_ttl_l1_config)
+        key = make_object_key(12345)
+        manager.reserve_write([key], [temporary], basic_layout)
+        manager.finish_write([key])
+
+        assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS  # A
+        time.sleep(1.2)
+        assert manager.finish_read([key])[key] == L1Error.KEY_IN_WRONG_STATE  # A
+        assert manager.reserve_read([key])[key][0] == L1Error.SUCCESS  # B
+        assert manager.finish_read([key])[key] == L1Error.SUCCESS  # B
+
+        if temporary:
+            assert manager.get_object_state(key) is None
+        else:
+            assert manager.delete([key])[key] == L1Error.SUCCESS
 
         manager.close()
 

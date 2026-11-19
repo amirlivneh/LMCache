@@ -404,7 +404,12 @@ class BaseL1Manager(L1ManagerInterface):
         Errors:
             KEY_NOT_EXIST: The key does not exist.
             KEY_IN_WRONG_STATE: The key is not read-locked, which
-                means the reader may read inconsistent data.
+                means the reader may read inconsistent data. The
+                caller's read locks are still released.
+
+        Note:
+            A reader whose read lock expired never releases the
+            lock of a reader that reserved the key after it.
         """
         total = validate_read_locks(read_locks)
         need_to_free: list[MemoryObj] = []
@@ -429,6 +434,11 @@ class BaseL1Manager(L1ManagerInterface):
                     "potential inconsistent data might be read",
                     key,
                 )
+                # The expired count is still in the counter (TTLLock.lock()
+                # never resets it), so hand it back; left in place it would
+                # keep the key locked after the next reader finishes.
+                for _ in range(total):
+                    entry.read_lock.unlock()
                 ret[key] = L1Error.KEY_IN_WRONG_STATE
                 continue
 

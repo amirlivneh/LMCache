@@ -33,9 +33,10 @@ class TTLLock {
   /**
    * @brief Increment the lock counter by 1 and update the TTL.
    *
-   * If the previous TTL has expired, the counter is reset to 1.
-   * Otherwise, the counter is incremented by 1.
-   * The TTL is always refreshed to the current time + TTL duration.
+   * The counter is always incremented by 1, also when the previous TTL has
+   * expired, so that a late unlock() from an expired holder cannot release
+   * a newer holder. The TTL is always refreshed to the current time + TTL
+   * duration.
    */
   void lock();
 
